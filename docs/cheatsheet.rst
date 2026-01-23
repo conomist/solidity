@@ -111,7 +111,7 @@ Mathematical and Cryptographic Functions
   arbitrary precision and does not wrap around at ``2**256``. Assert that ``k != 0`` starting from version 0.5.0.
 - ``mulmod(uint x, uint y, uint k) returns (uint)``: compute ``(x * y) % k`` where the multiplication is performed
   with arbitrary precision and does not wrap around at ``2**256``. Assert that ``k != 0`` starting from version 0.5.0.
-- ``erc7201(string memory id) returns (uint)``: compute the root of the namespace storage according to ERC7201 formula.
+- ``erc7201(string memory id) returns (uint)``: compute the root of the namespace storage according to ERC7201 formula. It can be used in compile time context.
 
 .. index:: this, super, selfdestruct
 

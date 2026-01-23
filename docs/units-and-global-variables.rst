@@ -246,11 +246,13 @@ Mathematical and Cryptographic Functions
 
     When running ``sha256``, ``ripemd160`` or ``ecrecover`` on a *private blockchain*, you might encounter Out-of-Gas. This is because these functions are implemented as "precompiled contracts" and only really exist after they receive the first message (although their contract code is hardcoded). Messages to non-existing contracts are more expensive and thus the execution might run into an Out-of-Gas error. A workaround for this problem is to first send Wei (1 for example) to each of the contracts before you use them in your actual contracts. This is not an issue on the main or test net.
 
-``erc7201(string memory id) returns (uint)```
+``erc7201(string memory id) returns (uint)``
     computes an integer number which represents the root of the storage namespace according to
     the formula defined by `ERC7201<https://eips.ethereum.org/EIPS/eip-7201>`.
     The function parameter is a string that identifies a namespace in a contract.
-    It should not contain any whitespace characters.
+.. note::
+    The ``erc7201`` built-in accepts strings containing whitespace characters, even though they are invalid according ERC-7201.
+    The compiler omits this validation because it can potentially be expensive if used in runtime contexts.
 
 .. index:: balance, codehash, send, transfer, call, callcode, delegatecall, staticcall
 
