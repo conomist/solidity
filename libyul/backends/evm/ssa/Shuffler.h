@@ -30,16 +30,18 @@ public:
 	State(StackData const& _stackData, Target const& _target, std::size_t _reachableStackDepth);
 
 	std::size_t size() const;
+	/// How many of `_slot` do we have on stack
 	std::size_t count(StackSlot const& _slot) const;
+	/// How many of `_slot` do we have in the args section of the stack
 	std::size_t countInArgs(StackSlot const& _slot) const;
+	/// How many of `_slot` do we have in the tail section of the stack
 	std::size_t countInTail(StackSlot const& _slot) const;
+	/// How many of `_slot` are (dup) reachable on stack
 	std::size_t countReachable(StackSlot const& _slot) const;
 
 	std::size_t targetMinCount(StackSlot const& _slot) const;
 	std::size_t targetArgsCount(StackSlot const& _slot) const;
 
-	bool argsRegionIsCorrect() const;
-	bool distributionIsCorrect() const;
 	bool admissible() const;
 
 	bool requiredInArgs(StackSlot const& _slot) const;
@@ -733,10 +735,9 @@ private:
 						_stack.swap(tailOffset);
 						return true;
 					}
+				// we needed to bring the slot into tail but couldn't, not enough stack target space -> spill to memory
+				yulAssert(false, "stack too deep: couldn't swap args slot into tail without moving something else out that is required there");
 			}
-
-			// we needed to bring the slot into tail but couldn't, not enough stack target space -> spill to memory
-			yulAssert(false, "stack too deep: couldn't swap args slot into tail without moving something else out that is required there");
 		}
 
 		if (_stack.size() < _state.target().tailSize)

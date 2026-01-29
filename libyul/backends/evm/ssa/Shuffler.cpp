@@ -83,29 +83,21 @@ std::size_t State::targetArgsCount(StackSlot const& _slot) const
 	return static_cast<size_t>(ranges::count(m_target.args, _slot));
 }
 
-bool State::argsRegionIsCorrect() const
+bool State::admissible() const
 {
 	if (m_target.size != m_stackData.size())
 		return false;
 
+	// check if the args are correct
 	for (size_t i = 0; i < m_target.args.size(); ++i)
 		if (!isArgsCompatible(StackOffset{m_stackData.size() - i - 1}, StackOffset{m_stackData.size() - i - 1}))
 			return false;
 
-	return true;
-}
-
-bool State::distributionIsCorrect() const
-{
+	// check if the distribution is correct (implying that the stack is admissible as JUNK target args are not counted)
 	for (auto const& [targetSlot, targetMinCount]: m_target.minCount)
 		if (count(targetSlot) < targetMinCount)
 			return false;
 	return true;
-}
-
-bool State::admissible() const
-{
-	return argsRegionIsCorrect() && distributionIsCorrect();
 }
 
 bool State::requiredInArgs(StackSlot const& _slot) const
