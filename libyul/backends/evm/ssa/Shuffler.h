@@ -199,82 +199,15 @@ private:
 		if (fixTailSlot(_stack, _state))
 			return true;
 		// fixing tail slot fills up the tail so that now the stack must reach into the args region
-		yulAssert(_stack.size() >= _state.target().tailSize);
+		yulAssert(_state.target().tailSize <= _stack.size() && _stack.size() <= _state.target().size);
 
 		// if the stack reaches into the args region try fixing a slot in there
 		if (fixArgsSlot(_stack, _state))
 			return true;
 
-		// we are now in a position that we only have to potentially dup up args and/or fix the existing args slots
-		yulAssert(_state.target().tailSize <= _stack.size() && _stack.size() <= _state.target().size);
-
 		// if there are no args, we should be done now
 		if (_state.target().args.empty())
 			return false;
-
-		// dup up whatever is missing
-		if (_stack.size() < _state.target().size)
-		{
-			if (dupDeepSlotIfRequired(_stack, _state))
-				return true;
-
-			{
-				StackOffset const targetOffset{_stack.size()};
-				if (_state.count(_state.targetArg(targetOffset)) < _state.targetMinCount(_state.targetArg(targetOffset)))
-				{
-					auto const sourceDepth = _stack.findSlotDepth(_state.targetArg(targetOffset));
-					if (!sourceDepth)
-					{
-						_stack.push(_state.targetArg(targetOffset));
-						return true;
-					}
-
-					if (!_stack.dupReachable(*sourceDepth))
-						yulAssert(false, fmt::format("todo: stack too deep handling, couldn't dup up arg {}", slotToString(_state.targetArg(_stack.depthToOffset(*sourceDepth)))));
-					_stack.dup(*sourceDepth);
-					return true;
-				}
-			}
-
-			// if we can't directly produce targetOffset, take the deepest arg that we don't have enough of and dup/push that
-			// First, prioritize duping args that are on the stack over pushing freely-generatable ones
-			for (StackOffset offset{_state.target().tailSize}; offset < _state.target().size; ++offset.value)
-			{
-				Slot const& arg = _state.targetArg(offset);
-				if (!arg.isJunk() && (_state.count(arg) < _state.targetMinCount(arg) || _state.countInArgs(arg) < _state.targetArgsCount(arg)))
-				{
-					if (auto sourceDepth = _stack.findSlotDepth(arg))
-					{
-						if (_stack.dupReachable(*sourceDepth))
-						{
-							_stack.dup(*sourceDepth);
-							return true;
-						}
-						yulAssert(false, "stack too deep handling");
-					}
-					yulAssert(_stack.canBeFreelyGenerated(arg));
-					_stack.push(arg);
-					return true;
-				}
-			}
-
-			if (!dupDeepSlotIfRequired(_stack, _state))
-			{
-				// Try to dup the optimal slot based on liveness analysis
-				if (auto slotToDup = selectOptimalSlotToDup(_stack, _state))
-				{
-					if (!dupDeepSlotIfRequired(_stack, _state))
-						_stack.dup(*slotToDup);
-				}
-				else
-				{
-					// If no suitable slot found, push junk
-					if (!dupDeepSlotIfRequired(_stack, _state))
-						_stack.push(Slot::makeJunk());
-				}
-			}
-			return true;
-		}
 
 		yulAssert(_stack.size() == _state.target().size);
 
@@ -318,8 +251,6 @@ private:
 				liveOutCount = static_cast<int>(_state.target().liveOut.count(slot.valueID()));
 			int deficit = liveOutCount - currentCount;
 
-			// int deficit = static_cast<int>(_state.targetMinCount(slot)) - currentCount;
-
 			// Update best if this deficit is higher
 			if (deficit > bestDeficit)
 			{
@@ -340,7 +271,7 @@ private:
 			// if we need the slot in args and there's no slot of the same kind further up
 			if (
 				_state.requiredInArgs(_stack[offset]) &&
-				std::find(_stack.begin() + offset.value + 1, _stack.end(), _stack[offset]) == _stack.end()
+				ranges::find(_stack.begin() + offset.value + 1, _stack.end(), _stack[offset]) == _stack.end()
 			)
 			{
 				// dup if we can
@@ -354,7 +285,7 @@ private:
 				if (shrinkStack(_stack, _state))
 					return true;
 
-				yulAssert(false, fmt::format("Stack too deep: can't reach slot af offset {}", offset.value));
+				yulAssert(false, fmt::format("Stack too deep: can't reach slot at offset {}", offset.value));
 			}
 		}
 		return false;
@@ -372,7 +303,7 @@ private:
 		{
 			// This slot needs to be moved into args and there is no tail slot of the same kind further up in the stack.
 			auto const& endangeredSlot = _stack[sourceOffset];
-			// no need top dup deep junk
+			// no need to dup deep junk
 			if (endangeredSlot.isJunk())
 				continue;
 			// check if we have more of the same slot further up in the stack
@@ -450,111 +381,115 @@ private:
 	static bool fixArgsSlot(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		yulAssert(_stack.size() <= _state.target().size, "this method assumes that the stack isn't too large");
-		if (_stack.size() <= _state.target().tailSize)
+		if (_stack.size() < _state.target().tailSize)
 			return false;
 
-		StackOffset const stackTop{_stack.size() - 1};
-		// if the stack top isn't where it likes to be right now, try to put it somewhere more sensible
-		if (!_state.isArgsCompatible(stackTop, stackTop))
+		// if we have at least one slot in the args section, try to fix something there
+		if (!_stack.empty() && _stack.size() >= _state.target().tailSize)
 		{
-			// if the stack top should go into the tail but isn't there yet and we have enough of it in args
-			if (
-				_state.requiredInTail(_stack[stackTop]) &&
-				_state.countInTail(_stack[stackTop]) == 0 &&
-				_state.countInArgs(_stack[stackTop]) > _state.targetArgsCount(_stack[stackTop])
-			)
+			StackOffset const stackTop{_stack.size() - 1};
+			// if the stack top isn't where it likes to be right now, try to put it somewhere more sensible
+			if (!_state.isArgsCompatible(stackTop, stackTop))
 			{
-				// try swapping it with something in the tail that also fixes the top
-				for (StackOffset offset: _state.stackTailRange())
-					if (_stack.swapReachable(offset) && _state.isArgsCompatible(offset, stackTop))
+				// if the stack top should go into the tail but isn't there yet and we have enough of it in args
+				if (
+					_state.requiredInTail(_stack[stackTop]) &&
+					_state.countInTail(_stack[stackTop]) == 0 &&
+					_state.countInArgs(_stack[stackTop]) > _state.targetArgsCount(_stack[stackTop])
+				)
+				{
+					// try swapping it with something in the tail that also fixes the top
+					for (StackOffset offset: _state.stackTailRange())
+						if (_stack.swapReachable(offset) && _state.isArgsCompatible(offset, stackTop))
+						{
+							_stack.swap(offset);
+							return true;
+						}
+					// otherwise try swapping it with something that needs to go into args
+					for (StackOffset offset: _state.stackTailRange())
+						if (_stack.swapReachable(offset) && _state.countInArgs(_stack[offset]) < _state.targetArgsCount(_stack[offset]))
+						{
+							_stack.swap(offset);
+							return true;
+						}
+					// otherwise try swapping it with something that can be popped
+					for (StackOffset offset: _state.stackTailRange())
+						if (_stack.swapReachable(offset) && _stack.canBeFreelyGenerated(_stack[offset]) && !_stack[offset].isLiteralValueID())
+						{
+							_stack.swap(offset);
+							return true;
+						}
+					// otherwise try swapping it with a literal
+					for (StackOffset offset: _state.stackTailRange())
+						if (_stack.swapReachable(offset) && _stack[offset].isLiteralValueID())
+						{
+							_stack.swap(offset);
+							return true;
+						}
+				}
+				// try finding a slot that is compatible with the top and also admits the current top:
+				//		- could be that the top slot is used elsewhere in the args (exclude junk)
+				//		- could be that the top slot is something that is only required in the tail
+				for (StackOffset offset: _state.stackArgsRange())
+					if (
+						offset != stackTop &&
+						_stack[offset] != _stack[stackTop] &&  // don't swap identical values (no-op)
+						_stack.swapReachable(offset) &&
+						_state.isArgsCompatible(offset, stackTop) &&
+						_state.isArgsCompatible(stackTop, offset) &&
+						!_state.targetArbitrary(offset)
+					)
 					{
 						_stack.swap(offset);
 						return true;
 					}
-				// otherwise try swapping it with something that needs to go into args
-				for (StackOffset offset: _state.stackTailRange())
-					if (_stack.swapReachable(offset) && _state.countInArgs(_stack[offset]) < _state.targetArgsCount(_stack[offset]))
-					{
-						_stack.swap(offset);
-						return true;
-					}
-				// otherwise try swapping it with something that can be popped
-				for (StackOffset offset: _state.stackTailRange())
-					if (_stack.swapReachable(offset) && _stack.canBeFreelyGenerated(_stack[offset]) && !_stack[offset].isLiteralValueID())
-					{
-						_stack.swap(offset);
-						return true;
-					}
-				// otherwise try swapping it with a literal
-				for (StackOffset offset: _state.stackTailRange())
-					if (_stack.swapReachable(offset) && _stack[offset].isLiteralValueID())
+
+				// try finding a slot in args that wants to have the top, swap that
+				for (StackOffset offset: _state.stackArgsRange())
+					if (
+						offset != stackTop &&
+						_stack[offset] != _stack[stackTop] &&  // don't swap identical values (no-op)
+						_stack.swapReachable(offset) &&
+						!_state.isArgsCompatible(offset, offset) &&
+						_state.isArgsCompatible(stackTop, offset)
+					)
 					{
 						_stack.swap(offset);
 						return true;
 					}
 			}
-			// try finding a slot that is compatible with the top and also admits the current top:
-			//		- could be that the top slot is used elsewhere in the args (exclude junk)
-			//		- could be that the top slot is something that is only required in the tail
-			for (StackOffset offset: _state.stackArgsRange())
-				if (
-					offset != stackTop &&
-					_stack[offset] != _stack[stackTop] &&  // don't swap identical values (no-op)
-					_stack.swapReachable(offset) &&
-					_state.isArgsCompatible(offset, stackTop) &&
-					_state.isArgsCompatible(stackTop, offset) &&
-					!_state.targetArbitrary(offset)
-				)
-				{
-					_stack.swap(offset);
-					return true;
-				}
 
-			// try finding a slot in args that wants to have the top, swap that
+			// swap up any slot in args that is out of position and has a slot available in args that it can occupy
 			for (StackOffset offset: _state.stackArgsRange())
-				if (
-					offset != stackTop &&
-					_stack[offset] != _stack[stackTop] &&  // don't swap identical values (no-op)
-					_stack.swapReachable(offset) &&
-					!_state.isArgsCompatible(offset, offset) &&
-					_state.isArgsCompatible(stackTop, offset)
-				)
-				{
-					_stack.swap(offset);
-					return true;
-				}
-		}
-
-		// swap up any slot in args that is out of position and has a slot available in args that it can occupy
-		for (StackOffset offset: _state.stackArgsRange())
-		{
-			bool const reachable = _stack.swapReachable(offset);
-			bool const identical = _state.isArgsCompatible(offset, stackTop) && !_state.targetArbitrary(stackTop);
-			if (
-				reachable &&
-				!identical && // we wouldn't just be swapping identical things
-				(
-					!_state.isArgsCompatible(offset, offset) || // the slot at offset isn't final
-					(_state.targetArbitrary(offset) && !_stack.slot(offset).isJunk()) // or the target is arbitrary and the current slot isn't already junk
-				)
-			)
 			{
-				// for each `targetOffset` in target args, see if we can't swap the out of position `offset` to `targetOffset`
-				for (StackOffset targetOffset: _state.stackArgsRange())
-					if (
-						targetOffset != offset &&  // we shouldn't be looking at the very same offset
-						_stack.swapReachable(targetOffset) &&  // the target offset should be within reach
-						_state.isArgsCompatible(offset, targetOffset) &&  // we can put offset -> targetOffset
-						!_state.isArgsCompatible(targetOffset, targetOffset)  // targetOffset doesn't like where it is
+				bool const reachable = _stack.swapReachable(offset);
+				bool const identical = _state.isArgsCompatible(offset, stackTop) && !_state.targetArbitrary(stackTop);
+				if (
+					reachable &&
+					!identical && // we wouldn't just be swapping identical things
+					(
+						!_state.isArgsCompatible(offset, offset) || // the slot at offset isn't final
+						(_state.targetArbitrary(offset) && !_stack.slot(offset).isJunk()) // or the target is arbitrary and the current slot isn't already junk
 					)
-					{
-						if (offset != stackTop)
-							// swap up slot at offset
-							_stack.swap(offset);
-						// bring slot at offset into fixed position
-						_stack.swap(targetOffset);
-						return true;
-					}
+				)
+				{
+					// for each `targetOffset` in target args, see if we can't swap the out of position `offset` to `targetOffset`
+					for (StackOffset targetOffset: _state.stackArgsRange())
+						if (
+							targetOffset != offset &&  // we shouldn't be looking at the very same offset
+							_stack.swapReachable(targetOffset) &&  // the target offset should be within reach
+							_state.isArgsCompatible(offset, targetOffset) &&  // we can put offset -> targetOffset
+							!_state.isArgsCompatible(targetOffset, targetOffset)  // targetOffset doesn't like where it is
+						)
+						{
+							if (offset != stackTop)
+								// swap up slot at offset
+									_stack.swap(offset);
+							// bring slot at offset into fixed position
+							_stack.swap(targetOffset);
+							return true;
+						}
+				}
 			}
 		}
 
@@ -604,25 +539,16 @@ private:
 				}
 			}
 
-			if (!dupDeepSlotIfRequired(_stack, _state))
-			{
-				// Try to dup the optimal slot based on liveness analysis
-				if (auto slotToDup = selectOptimalSlotToDup(_stack, _state))
-				{
-					if (!dupDeepSlotIfRequired(_stack, _state))
-						_stack.dup(*slotToDup);
-				}
-				else
-				{
-					// If no suitable slot found, push junk
-					if (!dupDeepSlotIfRequired(_stack, _state))
-						_stack.push(Slot::makeJunk());
-				}
-			}
+			// Try to dup the optimal slot based on liveness analysis
+			if (auto slotToDup = selectOptimalSlotToDup(_stack, _state))
+				_stack.dup(*slotToDup);
+			else
+				// If no suitable slot found, push junk
+				_stack.push(Slot::makeJunk());
 			return true;
 		}
 
-		// if we're at size and would have to push or dup something to satisfy args, try shrinking
+		// if we're at size and have to push or dup something to satisfy args
 		if (_stack.size() == _state.target().size)
 		{
 			for (auto const& arg: _state.target().args)
@@ -742,18 +668,11 @@ private:
 
 			// Try to dup the optimal slot based on liveness analysis
 			if (auto slotToDup = selectOptimalSlotToDup(_stack, _state))
-			{
-				if (!dupDeepSlotIfRequired(_stack, _state))
-					_stack.dup(*slotToDup);
-				return true;
-			}
+				_stack.dup(*slotToDup);
 			else
-			{
 				// If no suitable slot found, push junk
-				if (!dupDeepSlotIfRequired(_stack, _state))
-					_stack.push(Slot::makeJunk());
-				return true;
-			}
+				_stack.push(Slot::makeJunk());
+			return true;
 		}
 		return false;
 	}
