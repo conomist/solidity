@@ -1,12 +1,28 @@
+/*
+	This file is part of solidity.
+
+	solidity is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	solidity is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
+*/
+// SPDX-License-Identifier: GPL-3.0
+
 #pragma once
-
-#include "range/v3/view/iota.hpp"
-
 
 #include <libyul/backends/evm/ssa/LivenessAnalysis.h>
 #include <libyul/backends/evm/ssa/Stack.h>
 
 #include <boost/container/flat_map.hpp>
+#include <range/v3/view/iota.hpp>
 #include <cstddef>
 
 namespace solidity::yul::ssa
@@ -14,6 +30,8 @@ namespace solidity::yul::ssa
 
 namespace detail
 {
+/// Contains information about the shuffling target, aggregates over args and live out to
+/// provide a lower bound for the slot distribution.
 struct Target
 {
 	Target(StackData const& _args, LivenessAnalysis::LivenessData const& _liveOut, std::size_t _targetSize);
@@ -24,6 +42,7 @@ struct Target
 	std::size_t const tailSize;
 	boost::container::flat_map<StackSlot, size_t> minCount;
 };
+/// Current state of the stack vs the shuffling target.
 class State
 {
 public:
@@ -39,37 +58,52 @@ public:
 	/// How many of `_slot` are (dup) reachable on stack
 	std::size_t countReachable(StackSlot const& _slot) const;
 
+	/// Obtain the amount of the provided slot that is required for distribution correctness
 	std::size_t targetMinCount(StackSlot const& _slot) const;
+	/// Obtain the amount of the provided slot that is required in target args
 	std::size_t targetArgsCount(StackSlot const& _slot) const;
 
+	/// Checks if the state is compatible with the target
 	bool admissible() const;
 
+	/// Checks if a particular slot is required in the target args
 	bool requiredInArgs(StackSlot const& _slot) const;
+	/// Checks if a particular slot is required in the target tail
 	bool requiredInTail(StackSlot const& _slot) const;
 
+	/// Checks if an offset is in the target args (bounded from below by tail size, from above by target size)
 	bool offsetInTargetArgsRegion(StackOffset _offset) const;
+	/// Retrieves the required argument slot for a specific stack offset
 	StackSlot const& targetArg(StackOffset _targetOffset) const;
+	/// Checks the current stack offset is args-compatible with a target stack offset, meaning the target offset is
+	/// in the target args region and either a wildcard slot (JUNK) or a precise match for the slot at `_sourceOffset`
 	bool isArgsCompatible(StackOffset _sourceOffset, StackOffset _targetOffset) const;
+	/// Checks if the slot at `_targetOffset` admits any slot
 	bool targetArbitrary(StackOffset _targetOffset) const;
+	/// Yields whether two slots on the current stack are same, respecting stack size limits
 	bool isSourceCompatible(StackOffset _sourceOffset1, StackOffset _sourceOffset2) const;
-
+	/// Shuffling target information
 	Target const& target() const;
 
+	/// A range of offsets `[argsBegin, argsEnd)` intersected with the current stack size
 	auto stackArgsRange() const
 	{
-		return ranges::views::iota(std::min(m_target.tailSize, m_stackData.size()), m_stackData.size()) | ranges::views::transform([](auto _i) { return StackOffset{_i}; });
+		return ranges::views::iota(std::min(m_target.tailSize, m_stackData.size()), std::min(m_target.size, m_stackData.size())) | ranges::views::transform([](auto _i) { return StackOffset{_i}; });
 	}
 
+	/// A range of offsets `[0, argsBegin)` intersected with the current stack size
 	auto stackTailRange() const
 	{
 		return ranges::views::iota(0u, std::min(m_target.tailSize, m_stackData.size())) | ranges::views::transform([](auto _i) { return StackOffset{_i}; });
 	}
 
+	/// A range of offsets `[0, stackSize)`
 	auto stackRange() const
 	{
 		return ranges::views::iota(0u, m_stackData.size()) | ranges::views::transform([&](auto _i) { return StackOffset{_i}; });
 	}
 
+	/// A reversed range of offsets `[stackSize - reachableStackDepth - 1, stackSize)`
 	auto stackSwapReachableRange() const
 	{
 		return ranges::views::iota(0u, std::min(m_stackData.size(), m_reachableStackDepth + 1)) | ranges::views::transform([&](auto _i) { return StackOffset{m_stackData.size() - _i - 1}; });
@@ -110,7 +144,7 @@ public:
 				yulAssert(_stack.canBeFreelyGenerated(arg) || ranges::find(_stack.data(), arg) != ranges::end(_stack.data()));
 		}
 
-		constexpr std::size_t maxIterations = 1000;
+		static std::size_t constexpr maxIterations = 1000;
 		std::size_t i = 0;
 		while (i < maxIterations)
 		{
@@ -127,36 +161,10 @@ public:
 	}
 
 private:
+	/// Make a local step in stack space that should bring us closer to the target. Returns true if more shuffling
+	/// is required, returns false if finished.
 	static bool shuffleStep(Stack<Callback>& _stack, detail::State const& _state)
 	{
-		if (_stack.size() > _state.target().size)
-		{
-			if(shrinkStack(_stack, _state))
-				return true;
-			yulAssert(false, "stack too deep");
-		}
-		yulAssert(_stack.size() <= _state.target().size, "I1 violated: Stack size too large");
-
-		if (auto unreachableOffset = allNecessarySlotsReachableOrFinal(_stack, _state))
-		{
-			// !allNecessarySlotsReachableOrFinal(ops) ≡ ¬(∀s: reachable(s) ∨ final(s)) ≡ ∃s: ¬reachable(s) ∧ ¬final(s)
-			if (shrinkStack(_stack, _state))
-				return true;
-
-			yulAssert(false, fmt::format("stack too deep, couldn't reach offset {}", unreachableOffset->value));
-		}
-
-		// if we need something in the tail, try swapping it down there, there must be a spot
-		// that can be swapped out (although it might be unreachable in which case we'll try to fix args
-		// and/or compress)
-		if (fixTailSlot(_stack, _state))
-			return true;
-		yulAssert(_stack.size() >= _state.target().tailSize);
-
-		// if the stack reaches into the args region try fixing a slot in there
-		if (_stack.size() >= _state.target().tailSize && fixArgsSlot(_stack, _state))
-			return true;
-
 		{
 			// todo
 			// if there's something at the top of the stack that has to be popped anyways:
@@ -166,6 +174,36 @@ private:
 			//       the stack deficit (what is still missing) overshoot target size
 			//     - all below slots are also something that has to be popped or the tail end is finished
 		}
+
+		// if the stack is too large, we try to shrink it
+		if (_stack.size() > _state.target().size)
+		{
+			if(shrinkStack(_stack, _state))
+				return true;
+			// couldn't shrink to required size, need to spill to memory or increase target size
+			yulAssert(false, "stack too deep");
+		}
+		yulAssert(_stack.size() <= _state.target().size, "I1 violated: Stack size too large");
+
+		// all current slots are either in acceptable positions or at least dup-reachable
+		if (auto unreachableOffset = allNecessarySlotsReachableOrFinal(_stack, _state))
+		{
+			// !allNecessarySlotsReachableOrFinal(ops) ≡ ¬(∀s: reachable(s) ∨ final(s)) ≡ ∃s: ¬reachable(s) ∧ ¬final(s)
+			if (shrinkStack(_stack, _state))
+				return true;
+
+			yulAssert(false, fmt::format("stack too deep, couldn't reach offset {}", unreachableOffset->value));
+		}
+
+		// if we need something in the tail, try swapping it down there
+		if (fixTailSlot(_stack, _state))
+			return true;
+		// fixing tail slot fills up the tail so that now the stack must reach into the args region
+		yulAssert(_stack.size() >= _state.target().tailSize);
+
+		// if the stack reaches into the args region try fixing a slot in there
+		if (fixArgsSlot(_stack, _state))
+			return true;
 
 		// we are now in a position that we only have to potentially dup up args and/or fix the existing args slots
 		yulAssert(_state.target().tailSize <= _stack.size() && _stack.size() <= _state.target().size);
@@ -240,66 +278,19 @@ private:
 
 		yulAssert(_stack.size() == _state.target().size);
 
-		StackOffset stackTopOffset{_stack.size() - 1};
-
-		if (fixArgsSlot(_stack, _state))
-			return true;
-
-		// If we find a lower slot that is out of position, but also compatible with the top, swap that up.
-		for (StackOffset const offset: _state.stackSwapReachableRange())
-			if (
-				!_state.isArgsCompatible(offset, offset) &&
-				!_state.isSourceCompatible(offset, stackTopOffset) &&
-				_state.isArgsCompatible(offset, stackTopOffset) &&
-				_state.isArgsCompatible(stackTopOffset, offset) // &&
-			)
-			{
-				_stack.swap(offset);
-				return true;
-			}
-
-		// Swap up any reachable slot that is still out of position.
-		for (StackOffset const offset: _state.stackSwapReachableRange())
-			if (_stack.offsetToDepth(offset) < _state.target().args.size())
-			{
-				if (
-					_state.offsetInTargetArgsRegion(offset) &&
-					!_state.isArgsCompatible(offset, offset) &&
-					!_state.isSourceCompatible(offset, stackTopOffset) &&
-					_state.requiredInArgs(_stack[offset]) &&
-					_state.countInArgs(_stack[offset]) <= _state.targetArgsCount(_stack[offset])
-				)
-				{
-					_stack.swap(offset);
-					return true;
-				}
-			}
-			else
-			{
-				if (
-					_state.requiredInArgs(_stack[offset]) &&
-					_state.countInArgs(_stack[offset]) < _state.targetArgsCount(_stack[offset]) &&
-					!_state.isSourceCompatible(offset, stackTopOffset)
-				)
-				{
-					_stack.swap(offset);
-					return true;
-				}
-			}
-
 		if (_state.admissible())
 			return false;
 
-		// We are in a stack-too-deep situation and try to reduce the stack size.
+		// We couldn't improve the args tail or args situation, and we are not admissible yet, so try to reduce the
+		// stack size and pop something that we don't need
 		if (shrinkStack(_stack, _state))
 			return true;
 
 		yulAssert(false, "reached final and forbidden state");
 	}
 
-	// Select the optimal slot to dup based on liveness analysis.
-	// Prioritizes slots that have the highest deficit with respect to liveOut counts.
-	// @returns the depth of the best slot to dup, or nullopt if no suitable slot exists.
+	/// Select an optimal slot to dup based on liveness analysis.
+	/// Prioritizes slots that have the highest deficit with respect to liveOut counts.
 	static std::optional<StackDepth> selectOptimalSlotToDup(Stack<Callback> const& _stack, detail::State const& _state)
 	{
 		std::optional<StackDepth> bestSlot;
@@ -340,6 +331,7 @@ private:
 		return bestSlot;
 	}
 
+	/// Dups the deepest reachable slot in the tail that is required in args to
 	static bool dupDeepestRelevantTailSlot(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		// dup up the deepest slot that is required in args (or compress if unreachable)
@@ -368,9 +360,8 @@ private:
 		return false;
 	}
 
-	// If dupping an ideal slot causes a slot that will still be required to become unreachable, then dup
-	// the latter slot first.
-	// @returns true, if it performed a dup.
+	/// If dupping an ideal slot causes a slot that will still be required to become unreachable, then dup
+	/// the latter slot first
 	static bool dupDeepSlotIfRequired(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		// Check if the stack is large enough for anything to potentially become unreachable.
@@ -455,6 +446,7 @@ private:
 		return false;
 	}
 
+	/// Tries to fix a slot in the args section of the stack
 	static bool fixArgsSlot(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		yulAssert(_stack.size() <= _state.target().size, "this method assumes that the stack isn't too large");
@@ -657,15 +649,13 @@ private:
 							_stack.push(arg);
 						return true;
 					}
-					/*if (shrinkStack(_stack, _state))
-						return true;
-					else
-						yulAssert(false, "stack too deep");*/
 				}
 		}
 		return false;
 	}
 
+	/// Grows the tail if too small, otherwise tries swapping something down from args if its required in tail but not
+	/// there yet.
 	static bool fixTailSlot(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		yulAssert(_stack.size() <= _state.target().size, "this method assumes that the stack isn't exceeding target size");
@@ -768,6 +758,7 @@ private:
 		return false;
 	}
 
+	/// Tries to compress the stack
 	static bool shrinkStack(Stack<Callback>& _stack, detail::State const& _state)
 	{
 		yulAssert(!_stack.empty(), "Stack is empty, can't shrink");
@@ -875,6 +866,7 @@ private:
 		return false;
 	}
 
+	/// Checks if all current slots are either in a position that is compatible with the target or, if not, are dup-reachable.
 	static std::optional<StackOffset> allNecessarySlotsReachableOrFinal(Stack<Callback> const& _stack, detail::State const& _state)
 	{
 		// check that args are either in position or reachable
