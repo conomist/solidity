@@ -6,12 +6,12 @@ targetStackSize: 3
 // ----
 //             |      0 |      1      2 |      3
 //             +------- +-------------- +-------
-//    (initial)|      * |     v2        |
-//         DUP1|      * |     v2     v2 |
-//        SWAP2|     v2 |     v2      * |
+//    (initial)|      * |     v2        |       
+//         DUP1|      * |     v2     v2 |       
+//        SWAP2|     v2 |     v2      * |       
 //    PUSH lit0|     v2 |     v2      * |   lit0
 //        SWAP2|     v2 |   lit0      * |     v2
 //        SWAP1|     v2 |   lit0     v2 |      *
-//          POP|     v2 |   lit0     v2 |
+//          POP|     v2 |   lit0     v2 |       
 //             +------- +-------------- +-------
 //     (target)|   {v2} |   lit0     v2 |
