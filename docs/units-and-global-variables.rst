@@ -250,6 +250,7 @@ Mathematical and Cryptographic Functions
     computes an integer number which represents the root of the storage namespace according to
     the formula defined by `ERC7201<https://eips.ethereum.org/EIPS/eip-7201>`.
     The function parameter is a string that identifies a namespace in a contract.
+
 .. note::
     The ``erc7201`` built-in accepts strings containing whitespace characters, even though they are invalid according ERC-7201.
     The compiler omits this validation because it can potentially be expensive if used in runtime contexts.
